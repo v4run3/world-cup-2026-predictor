@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# Data (large/raw files) — keep dir structure via .gitkeep
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Model artifacts
+models/*.pkl
+models/*.json
+models/*.joblib
+!models/.gitkeep
+
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
