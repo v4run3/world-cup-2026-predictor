@@ -32,16 +32,34 @@ from src.model import (
     most_likely_scoreline,
 )
 
-# Loaded once and cached at module level.
-_TEAM_STATE = load_team_state()
-_OUTCOME_MODEL, _SCORELINE_MODEL = load_models()
-
 _DEFAULT_ELO = 1500
+
+# Lazily loaded + cached so a fresh deploy can bootstrap artifacts first.
+_cache: dict = {}
+
+
+def _ensure_loaded() -> None:
+    if "team_state" in _cache:
+        return
+    from src.bootstrap import ensure_ready
+    ensure_ready(log=lambda *_: None)
+    _cache["team_state"] = load_team_state()
+    _cache["models"] = load_models()
+
+
+def _team_state() -> dict:
+    _ensure_loaded()
+    return _cache["team_state"]
+
+
+def _models():
+    _ensure_loaded()
+    return _cache["models"]
 
 
 def _state(team: str) -> dict:
     """Current state for a team, with neutral defaults for unknown teams."""
-    return _TEAM_STATE.get(
+    return _team_state().get(
         team,
         {"elo": _DEFAULT_ELO, "form_pts": 1.0, "gf_avg": 1.0, "ga_avg": 1.0},
     )
@@ -71,15 +89,34 @@ def _feature_row(home: str, away: str, neutral: bool) -> dict:
     }
 
 
+def match_lambdas(home_team: str, away_team: str, neutral: bool = True) -> tuple[float, float]:
+    """Expected goals (lambda_home, lambda_away) for a matchup.
+
+    Used by the tournament Monte-Carlo. Falls back to an Elo-gap estimate if the
+    Poisson model isn't available.
+    """
+    _, scoreline_model = _models()
+    if scoreline_model is not None and bool(_team_state()):
+        X = pd.DataFrame([_feature_row(home_team, away_team, neutral)])
+        lam_h = float(scoreline_model["home"].predict(X[GOAL_FEATURES])[0])
+        lam_a = float(scoreline_model["away"].predict(X[GOAL_FEATURES])[0])
+        return lam_h, lam_a
+    # Fallback: derive crude expected goals from the Elo gap.
+    h_elo, a_elo = _state(home_team)["elo"], _state(away_team)["elo"]
+    gap = (h_elo + (0 if neutral else config.ELO_HOME_ADVANTAGE) - a_elo) / 200
+    return max(0.2, 1.4 + 0.5 * gap), max(0.2, 1.4 - 0.5 * gap)
+
+
 def predict_match(home_team: str, away_team: str, neutral: bool = True) -> dict:
     """Predict a single match using the trained models (or a fallback heuristic)."""
     h_elo, a_elo = _state(home_team)["elo"], _state(away_team)["elo"]
     strength = {"home": _to_strength_score(h_elo), "away": _to_strength_score(a_elo)}
 
+    outcome_model, scoreline_model = _models()
     models_ready = (
-        _OUTCOME_MODEL is not None
-        and _SCORELINE_MODEL is not None
-        and bool(_TEAM_STATE)
+        outcome_model is not None
+        and scoreline_model is not None
+        and bool(_team_state())
     )
 
     if models_ready:
@@ -87,7 +124,7 @@ def predict_match(home_team: str, away_team: str, neutral: bool = True) -> dict:
         X = pd.DataFrame([row])
 
         # Outcome probabilities: model classes are 0=away, 1=draw, 2=home.
-        proba = _OUTCOME_MODEL.predict_proba(X[OUTCOME_FEATURES])[0]
+        proba = outcome_model.predict_proba(X[OUTCOME_FEATURES])[0]
         probs = {
             "away_win": round(float(proba[0]), 3),
             "draw": round(float(proba[1]), 3),
@@ -95,8 +132,8 @@ def predict_match(home_team: str, away_team: str, neutral: bool = True) -> dict:
         }
 
         # Scoreline from the Poisson goal models.
-        lam_h = float(_SCORELINE_MODEL["home"].predict(X[GOAL_FEATURES])[0])
-        lam_a = float(_SCORELINE_MODEL["away"].predict(X[GOAL_FEATURES])[0])
+        lam_h = float(scoreline_model["home"].predict(X[GOAL_FEATURES])[0])
+        lam_a = float(scoreline_model["away"].predict(X[GOAL_FEATURES])[0])
         scoreline = most_likely_scoreline(lam_h, lam_a)
 
         return {

@@ -6,12 +6,24 @@ Other pages live in the pages/ folder and appear in the sidebar automatically.
 import streamlit as st
 
 import src.data_collection as dc
+from src.bootstrap import ensure_ready
 
 st.set_page_config(
     page_title="World Cup 2026 Predictor",
     page_icon="⚽",
     layout="wide",
 )
+
+
+@st.cache_resource
+def _bootstrap():
+    """Download data + build models on first launch (cached for the session)."""
+    with st.spinner("Setting up data and models (first run only, ~30s)..."):
+        ensure_ready()
+    return True
+
+
+_bootstrap()
 
 st.title("⚽ FIFA World Cup 2026 Predictor")
 st.caption("Match outcomes, scorelines, win probabilities & team strength — powered by historical data.")
@@ -47,8 +59,8 @@ with st.expander("Project roadmap"):
 4. ✅ **Model training** — XGBoost (outcome) + Poisson (scoreline)
 5. ✅ **Prediction layer** — models wired into the UI
 6. ✅ **Team analysis** — strength breakdowns & charts
-7. ⬜ **Tournament simulation** — Monte Carlo the bracket (you are here)
-8. ⬜ **Polish & deploy** — Streamlit Community Cloud
+7. ✅ **Tournament simulation** — Monte Carlo the bracket
+8. ✅ **Polish & deploy** — auto-bootstrap, ready for Streamlit Cloud
 """
     )
 
