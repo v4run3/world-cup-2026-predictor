@@ -3,6 +3,15 @@
 Run with:  streamlit run app.py
 Other pages live in the pages/ folder and appear in the sidebar automatically.
 """
+
+import sys
+
+# Streamlit Cloud's hot-reload keeps old module objects alive in sys.modules.
+# Clearing src.* here ensures every run (including after a code deploy) always
+# imports the latest versions of our modules — no stale cached bytecode.
+for _k in [k for k in sys.modules if k == "src" or k.startswith("src.")]:
+    del sys.modules[_k]
+
 import streamlit as st
 
 import src.data_collection as dc
@@ -26,7 +35,9 @@ def _bootstrap():
 _bootstrap()
 
 st.title("⚽ FIFA World Cup 2026 Predictor")
-st.caption("Match outcomes, scorelines, win probabilities & team strength — powered by historical data.")
+st.caption(
+    "Match outcomes, scorelines, win probabilities & team strength — powered by historical data."
+)
 
 st.markdown(
     """
