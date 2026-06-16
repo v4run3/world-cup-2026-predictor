@@ -58,9 +58,10 @@ def _read_raw() -> pd.DataFrame:
     df = pd.read_csv(
         config.RESULTS_CSV,
         encoding="utf-8",
-        parse_dates=["date"],
         dtype={"home_team": "string", "away_team": "string"},
     )
+    # Explicit conversion is more reliable than parse_dates= across pandas versions.
+    df["date"] = pd.to_datetime(df["date"])
     # neutral comes in as "TRUE"/"FALSE" strings.
     df["neutral"] = df["neutral"].astype(str).str.upper().eq("TRUE")
     return df
@@ -137,22 +138,28 @@ def _apply_wc2026_patch(df: pd.DataFrame) -> pd.DataFrame:
     """
     if not _WC2026_PATCH_CSV.exists():
         return df
+    try:
+        patch = pd.read_csv(_WC2026_PATCH_CSV)
+        # Explicit to_datetime avoids parse_dates= inconsistencies across pandas versions.
+        patch["date"] = pd.to_datetime(patch["date"])
+        patch["neutral"] = patch["neutral"].astype(str).str.upper().eq("TRUE")
 
-    patch = pd.read_csv(_WC2026_PATCH_CSV, parse_dates=["date"])
-    patch["neutral"] = patch["neutral"].astype(str).str.upper().eq("TRUE")
-
-    df = df.copy()
-    for _, p in patch.iterrows():
-        mask = (
-            (df["date"].dt.date == p["date"].date())
-            & (df["home_team"] == p["home_team"])
-            & (df["away_team"] == p["away_team"])
-        )
-        if mask.any():
-            df.loc[mask, "home_score"] = float(p["home_score"])
-            df.loc[mask, "away_score"] = float(p["away_score"])
-
-    return df
+        df = df.copy()
+        for _, p in patch.iterrows():
+            p_date = pd.Timestamp(p["date"]).date()
+            # Use .astype(str) to handle StringDtype vs object dtype consistently.
+            mask = (
+                (df["date"].dt.date == p_date)
+                & (df["home_team"].astype(str) == str(p["home_team"]))
+                & (df["away_team"].astype(str) == str(p["away_team"]))
+            )
+            if mask.any():
+                df.loc[mask, "home_score"] = float(p["home_score"])
+                df.loc[mask, "away_score"] = float(p["away_score"])
+        return df
+    except Exception:
+        # Never let a bad patch file break the whole schedule page.
+        return df
 
 
 def load_all_wc2026_matches() -> pd.DataFrame:

@@ -77,7 +77,9 @@ def _load_features() -> pd.DataFrame:
         raise FileNotFoundError(
             f"{config.FEATURES_CSV} not found. Run: python -m src.features"
         )
-    return pd.read_csv(config.FEATURES_CSV, parse_dates=["date"]).sort_values("date")
+    df = pd.read_csv(config.FEATURES_CSV)
+    df["date"] = pd.to_datetime(df["date"])
+    return df.sort_values("date")
 
 
 def _time_split(df: pd.DataFrame):
