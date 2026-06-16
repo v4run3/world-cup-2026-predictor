@@ -4,12 +4,20 @@ Two models work together:
   * XGBoost multiclass classifier -> Away Win / Draw / Home Win + probabilities
   * Two Poisson regressors -> expected goals per side -> most likely scoreline
 
+Improvements over baseline:
+  * Tournament-weighted training: World Cup matches count more than friendlies.
+  * Variable-K Elo produces better-calibrated pre-match ratings as features.
+  * Extended feature set: goal-difference form, head-to-head advantage,
+    tournament importance, symmetric Poisson goal features.
+  * Better XGBoost hyperparameters: more estimators, lower LR, L1+L2 reg.
+
 Training uses a **time-based split** (older matches train, most recent matches
 test) — never a random split, which would leak future form into the past.
 
 Run directly to train and evaluate:
     python -m src.model
 """
+
 from __future__ import annotations
 
 import joblib
@@ -26,19 +34,42 @@ import config
 
 # Features fed to the outcome classifier (must exist in features.csv).
 OUTCOME_FEATURES = [
-    "elo_home", "elo_away", "elo_diff", "elo_exp_home", "neutral",
-    "home_form_pts", "away_form_pts",
-    "home_gf_avg", "home_ga_avg", "away_gf_avg", "away_ga_avg",
+    "elo_home",
+    "elo_away",
+    "elo_diff",
+    "elo_exp_home",
+    "neutral",
+    "home_form_pts",
+    "away_form_pts",
+    "home_gf_avg",
+    "home_ga_avg",
+    "away_gf_avg",
+    "away_ga_avg",
+    "home_form_gd",
+    "away_form_gd",  # goal-difference form (new)
+    "tournament_weight",  # match importance (new)
+    "h2h_home_adv",  # head-to-head advantage (new)
 ]
 
-# Features for the goal (Poisson) models.
+# Features for the goal (Poisson) models — symmetric so both sides are covered.
 GOAL_FEATURES = [
-    "elo_home", "elo_away", "elo_diff", "neutral",
-    "home_gf_avg", "away_ga_avg", "home_form_pts",
+    "elo_home",
+    "elo_away",
+    "elo_diff",
+    "neutral",
+    "home_gf_avg",
+    "home_ga_avg",
+    "away_gf_avg",
+    "away_ga_avg",
+    "home_form_pts",
+    "away_form_pts",
+    "home_form_gd",
+    "away_form_gd",
+    "tournament_weight",
 ]
 
 TEST_FRACTION = 0.15  # most-recent share held out for evaluation
-MAX_GOALS = 8         # scoreline grid cap for the Poisson model
+MAX_GOALS = 8  # scoreline grid cap for the Poisson model
 
 
 def _load_features() -> pd.DataFrame:
@@ -63,32 +94,47 @@ def train_outcome_model(df: pd.DataFrame | None = None, verbose: bool = True):
     X_tr, y_tr = train[OUTCOME_FEATURES], train["target"]
     X_te, y_te = test[OUTCOME_FEATURES], test["target"]
 
+    # Tournament-weighted training: WC matches (weight 1.0) count 3x friendlies (0.33)
+    sample_weight = (
+        train["tournament_weight"].to_numpy()
+        if "tournament_weight" in train.columns
+        else None
+    )
+
     model = XGBClassifier(
         objective="multi:softprob",
         num_class=3,
-        n_estimators=400,
+        n_estimators=800,
         max_depth=4,
-        learning_rate=0.05,
-        subsample=0.9,
-        colsample_bytree=0.9,
+        learning_rate=0.02,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=5,
+        gamma=0.05,
+        reg_alpha=0.05,
+        reg_lambda=1.0,
         eval_metric="mlogloss",
         n_jobs=-1,
+        random_state=42,
     )
-    model.fit(X_tr, y_tr)
+    model.fit(X_tr, y_tr, sample_weight=sample_weight)
 
     if verbose:
         proba = model.predict_proba(X_te)
         preds = proba.argmax(axis=1)
-        # Baseline: always predict the most common class (home win).
         baseline = accuracy_score(y_te, np.full(len(y_te), df["target"].mode()[0]))
         print("--- XGBoost outcome model ---")
         print(f"  train rows : {len(train):,}   test rows : {len(test):,}")
-        print(f"  accuracy   : {accuracy_score(y_te, preds):.3f}  (majority baseline {baseline:.3f})")
+        print(
+            f"  accuracy   : {accuracy_score(y_te, preds):.3f}  (majority baseline {baseline:.3f})"
+        )
         print(f"  log-loss   : {log_loss(y_te, proba):.3f}")
         print("  top features:")
-        imp = sorted(zip(OUTCOME_FEATURES, model.feature_importances_), key=lambda x: -x[1])
-        for name, val in imp[:5]:
-            print(f"    {name:16s} {val:.3f}")
+        imp = sorted(
+            zip(OUTCOME_FEATURES, model.feature_importances_), key=lambda x: -x[1]
+        )
+        for name, val in imp[:8]:
+            print(f"    {name:20s} {val:.3f}")
 
     config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
     model.save_model(config.XGB_MODEL)
@@ -102,8 +148,13 @@ def train_scoreline_model(df: pd.DataFrame | None = None, verbose: bool = True):
     train, test = _time_split(df)
 
     # Scale first: raw Elo (~1500-2100) overflows the Poisson log-link otherwise.
-    home_model = make_pipeline(StandardScaler(), PoissonRegressor(alpha=0.1, max_iter=1000))
-    away_model = make_pipeline(StandardScaler(), PoissonRegressor(alpha=0.1, max_iter=1000))
+    # Higher alpha (0.5) regularizes the expanded feature set.
+    home_model = make_pipeline(
+        StandardScaler(), PoissonRegressor(alpha=0.5, max_iter=2000)
+    )
+    away_model = make_pipeline(
+        StandardScaler(), PoissonRegressor(alpha=0.5, max_iter=2000)
+    )
     home_model.fit(train[GOAL_FEATURES], _goals(train, "home"))
     away_model.fit(train[GOAL_FEATURES], _goals(train, "away"))
 
@@ -126,7 +177,7 @@ def most_likely_scoreline(lambda_home: float, lambda_away: float) -> tuple[int, 
     """Most probable (home, away) scoreline given expected goals."""
     h = poisson.pmf(np.arange(MAX_GOALS + 1), lambda_home)
     a = poisson.pmf(np.arange(MAX_GOALS + 1), lambda_away)
-    grid = np.outer(h, a)  # grid[i, j] = P(home=i, away=j)
+    grid = np.outer(h, a)
     i, j = np.unravel_index(grid.argmax(), grid.shape)
     return int(i), int(j)
 

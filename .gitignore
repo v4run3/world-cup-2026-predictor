@@ -11,6 +11,7 @@ data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+!data/raw/wc2026_patch.csv
 
 # Model artifacts
 models/*.pkl

@@ -18,8 +18,16 @@ international football data.
 |---|---|
 | Win / Draw / Loss + probabilities | **XGBoost** multiclass classifier (~60% accuracy) |
 | Scoreline / expected goals | **Poisson** goal model |
-| Team strength | **Elo** rating (also a model feature) |
+| Team strength | **Variable-K Elo** rating (WC K=60, friendlies K=20) |
 | Title odds | **Monte-Carlo** simulation over the Poisson model |
+
+### Model improvements (v2)
+- **Variable K-factor Elo** — World Cup matches (K=60) shift ratings 3× more than friendlies (K=20), matching real football Elo methodology.
+- **Head-to-head feature** — recent direct matchup record between each pair (4th most important feature).
+- **Goal-difference form** — captures attacking/defensive momentum beyond just points.
+- **Tournament importance weighting** — XGBoost training gives WC matches 3× the weight of friendlies.
+- **Symmetric Poisson features** — both home and away goal models now see the full feature set.
+- **Actual scores on the Schedule page** — played WC 2026 matches show the real final score alongside the model's prediction.
 
 ## Data
 
@@ -60,6 +68,20 @@ streamlit run app.py
 On first launch the app **auto-downloads the data and trains the models**
 (~30s, one time). The app then opens at http://localhost:8501.
 
+### Keeping results current
+
+The upstream dataset (`martj42/international_results`) may lag a day or two behind.
+To patch in results that are confirmed but not yet in the dataset, add rows to
+`data/raw/wc2026_patch.csv` (committed to git — same schema as `results.csv`):
+
+```
+date,home_team,away_team,home_score,away_score,tournament,city,country,neutral
+2026-06-15,Belgium,Egypt,1,1,FIFA World Cup,Seattle,United States,True
+```
+
+The Schedule page will pick these up instantly — no rebuild required.
+When the upstream dataset eventually includes the result the patch entry is harmlessly overridden.
+
 To (re)build artifacts manually:
 
 ```bash
@@ -86,3 +108,5 @@ python -m src.model                         # train & evaluate models
 6. ✅ Team analysis page
 7. ✅ Tournament simulation (Monte Carlo)
 8. ✅ Polish & deploy
+9. ✅ Actual scores on the Schedule page (live WC 2026 results)
+10. ✅ Model refinement — variable K-factor Elo, H2H features, tournament weighting

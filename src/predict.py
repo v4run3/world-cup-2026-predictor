@@ -1,7 +1,7 @@
 """Step 5 — Prediction layer.
 
 The single entry point the Streamlit UI calls. It builds a feature vector for a
-matchup from each team's current state (Elo + rolling form), runs the trained
+matchup from each team's current state (Elo + rolling form + H2H), runs the trained
 XGBoost classifier for outcome probabilities and the Poisson model for the most
 likely scoreline.
 
@@ -14,17 +14,18 @@ Return shape (stable contract the UI depends on):
         "home_team", "away_team",
         "probs": {"home_win", "draw", "away_win"},   # sum to 1.0
         "scoreline": (home_goals, away_goals),
+        "expected_goals": (lam_home, lam_away) | None,
         "strength": {"home": float, "away": float},   # 0-100
         "source": "model" | "heuristic",
     }
 """
+
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 import config
-from src.features import expected_score, load_team_state
+from src.features import expected_score, load_h2h, load_team_state
 from src.model import (
     GOAL_FEATURES,
     OUTCOME_FEATURES,
@@ -42,9 +43,11 @@ def _ensure_loaded() -> None:
     if "team_state" in _cache:
         return
     from src.bootstrap import ensure_ready
+
     ensure_ready(log=lambda *_: None)
     _cache["team_state"] = load_team_state()
     _cache["models"] = load_models()
+    _cache["h2h"] = load_h2h()
 
 
 def _team_state() -> dict:
@@ -57,11 +60,31 @@ def _models():
     return _cache["models"]
 
 
+def _h2h() -> dict:
+    _ensure_loaded()
+    return _cache.get("h2h", {})
+
+
+def _h2h_lookup(home: str, away: str) -> float:
+    """Return H2H advantage for home team: positive = home has won more recently."""
+    h2h_data = _h2h()
+    # Table stored with alphabetically-first team as team_a
+    ta, tb = sorted([home, away])
+    adv = h2h_data.get((ta, tb), 0.0)
+    return adv if ta == home else -adv
+
+
 def _state(team: str) -> dict:
     """Current state for a team, with neutral defaults for unknown teams."""
     return _team_state().get(
         team,
-        {"elo": _DEFAULT_ELO, "form_pts": 1.0, "gf_avg": 1.0, "ga_avg": 1.0},
+        {
+            "elo": _DEFAULT_ELO,
+            "form_pts": 1.0,
+            "gf_avg": 1.0,
+            "ga_avg": 1.0,
+            "form_gd": 0.0,
+        },
     )
 
 
@@ -70,10 +93,13 @@ def _to_strength_score(elo: float) -> float:
     return round(max(0, min(100, (elo - 1500) / 7)), 1)
 
 
-def _feature_row(home: str, away: str, neutral: bool) -> dict:
+def _feature_row(
+    home: str, away: str, neutral: bool, tournament_weight: float = 1.0
+) -> dict:
     """Assemble the model feature vector for a single matchup."""
     h, a = _state(home), _state(away)
     adv = 0 if neutral else config.ELO_HOME_ADVANTAGE
+    h2h_adv = _h2h_lookup(home, away)
     return {
         "elo_home": h["elo"],
         "elo_away": a["elo"],
@@ -86,10 +112,16 @@ def _feature_row(home: str, away: str, neutral: bool) -> dict:
         "home_ga_avg": h["ga_avg"],
         "away_gf_avg": a["gf_avg"],
         "away_ga_avg": a["ga_avg"],
+        "home_form_gd": h.get("form_gd", round(h["gf_avg"] - h["ga_avg"], 3)),
+        "away_form_gd": a.get("form_gd", round(a["gf_avg"] - a["ga_avg"], 3)),
+        "tournament_weight": tournament_weight,
+        "h2h_home_adv": h2h_adv,
     }
 
 
-def match_lambdas(home_team: str, away_team: str, neutral: bool = True) -> tuple[float, float]:
+def match_lambdas(
+    home_team: str, away_team: str, neutral: bool = True, tournament_weight: float = 1.0
+) -> tuple[float, float]:
     """Expected goals (lambda_home, lambda_away) for a matchup.
 
     Used by the tournament Monte-Carlo. Falls back to an Elo-gap estimate if the
@@ -97,7 +129,9 @@ def match_lambdas(home_team: str, away_team: str, neutral: bool = True) -> tuple
     """
     _, scoreline_model = _models()
     if scoreline_model is not None and bool(_team_state()):
-        X = pd.DataFrame([_feature_row(home_team, away_team, neutral)])
+        X = pd.DataFrame(
+            [_feature_row(home_team, away_team, neutral, tournament_weight)]
+        )
         lam_h = float(scoreline_model["home"].predict(X[GOAL_FEATURES])[0])
         lam_a = float(scoreline_model["away"].predict(X[GOAL_FEATURES])[0])
         return lam_h, lam_a
@@ -107,7 +141,9 @@ def match_lambdas(home_team: str, away_team: str, neutral: bool = True) -> tuple
     return max(0.2, 1.4 + 0.5 * gap), max(0.2, 1.4 - 0.5 * gap)
 
 
-def predict_match(home_team: str, away_team: str, neutral: bool = True) -> dict:
+def predict_match(
+    home_team: str, away_team: str, neutral: bool = True, tournament_weight: float = 1.0
+) -> dict:
     """Predict a single match using the trained models (or a fallback heuristic)."""
     h_elo, a_elo = _state(home_team)["elo"], _state(away_team)["elo"]
     strength = {"home": _to_strength_score(h_elo), "away": _to_strength_score(a_elo)}
@@ -120,7 +156,7 @@ def predict_match(home_team: str, away_team: str, neutral: bool = True) -> dict:
     )
 
     if models_ready:
-        row = _feature_row(home_team, away_team, neutral)
+        row = _feature_row(home_team, away_team, neutral, tournament_weight)
         X = pd.DataFrame([row])
 
         # Outcome probabilities: model classes are 0=away, 1=draw, 2=home.
